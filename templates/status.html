@@ -1,0 +1,85 @@
+{% extends "layout.html" %}
+{% block body %}
+<div class="container">
+    <div class="row pt-5">
+        <div class="col-lg-10 mx-lg-auto">
+            <h1 class="mb-3">Persistence status</h1>
+            <table class="table table-sm table-bordered align-middle">
+                <tbody>
+                    <tr>
+                        <th scope="row">connection_mode</th>
+                        <td id="connection_mode"><code>{{ status.connection_mode }}</code></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">mongo_client_connected</th>
+                        <td id="mongo_client_connected">{{ status.mongo_client_connected }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">mongo_ping_ok</th>
+                        <td id="mongo_ping_ok">{{ status.mongo_ping_ok }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">mongo_db</th>
+                        <td id="mongo_db">{{ status.mongo_db }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">connect_attempts</th>
+                        <td id="connect_attempts">{{ status.connect_attempts }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">connect_failures</th>
+                        <td id="connect_failures">{{ status.connect_failures }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">reconnects</th>
+                        <td id="reconnects">{{ status.reconnects }}</td>
+                    </tr>
+                    <tr>
+                        <th scope="row">dao_total_calls</th>
+                        <td id="dao_total_calls"><strong>{{ status.dao_total_calls }}</strong></td>
+                    </tr>
+                    <tr>
+                        <th scope="row">dao_total_failures</th>
+                        <td id="dao_total_failures">{{ status.dao_total_failures }}</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <h2 class="h4 mt-4">DAO call counts</h2>
+            <table class="table table-sm table-striped align-middle">
+                <thead>
+                    <tr>
+                        <th>dao</th>
+                        <th>class</th>
+                        <th>collection</th>
+                        <th>total_calls</th>
+                        <th>total_failures</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for dao_name in ["user_dao", "note_dao", "message_dao"] %}
+                    <tr>
+                        <td id="{{ dao_name }}_name">{{ dao_name }}</td>
+                        <td id="{{ dao_name }}_class"><code>{{ status[dao_name].module }}.{{ status[dao_name].class }}</code></td>
+                        <td id="{{ dao_name }}_collection">{{ status[dao_name].collection }}</td>
+                        <td id="{{ dao_name }}_total_calls">{{ status[dao_name].total_calls }}</td>
+                        <td id="{{ dao_name }}_total_failures">{{ status[dao_name].total_failures }}</td>
+                    </tr>
+                    {% for method, count in status[dao_name].calls.items() %}
+                    <tr class="small text-muted">
+                        <td></td>
+                        <td colspan="2"><code>{{ method }}</code></td>
+                        <td>{{ count }}</td>
+                        <td>{{ status[dao_name].failures.get(method, 0) }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% endfor %}
+                </tbody>
+            </table>
+
+            <p class="mt-3"><a href="{{ url_for('status') }}?format=json">View JSON</a></p>
+            <pre id="status_json" class="bg-light p-3 border">{{ raw }}</pre>
+        </div>
+    </div>
+</div>
+{% endblock %}

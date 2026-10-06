@@ -1,12 +1,12 @@
 from itsdangerous import URLSafeTimedSerializer
-import configparser
 
-# Configuration
-config = configparser.ConfigParser()
-config.read('configuration.ini')
-default = config['DEFAULT']
-SECRET_KEY = default['SECRET_KEY']
-SECURITY_PASSWORD_SALT = default['SECURITY_PASSWORD_SALT']
+from persistence.config import load_settings
+
+# Configuration is now resolved by the persistence layer's config reader,
+# removing the duplicate ConfigParser instantiation.
+_settings = load_settings()
+SECRET_KEY = _settings.secret_key
+SECURITY_PASSWORD_SALT = _settings.security_password_salt
 
 def generate_confirmation_token(email):
     serializer = URLSafeTimedSerializer(SECRET_KEY)
