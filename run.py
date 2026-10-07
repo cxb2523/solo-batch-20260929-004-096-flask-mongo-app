@@ -4,7 +4,6 @@
 from flask import Flask, render_template, request, url_for, request, redirect, abort
 from flask_login import LoginManager, login_user, logout_user, login_required, current_user
 from flask_talisman import Talisman
-from flask_pymongo import PyMongo
 from flask_bcrypt import Bcrypt
 from flask_wtf.csrf import CSRFProtect
 
@@ -22,6 +21,14 @@ from message import Message
 from note import Note
 from email_utility import send_email, send_registration_email, send_message_email
 from verification import confirm_token
+from persistence import (
+    get_factory,
+    UserDAO,
+    NoteDAO,
+    MessageDAO,
+    PersistenceError,
+    DuplicateEmailError,
+)
 
 
 # Create app
@@ -36,8 +43,11 @@ app.config['MONGO_DBNAME'] = os.environ.get('MONGO_DBNAME')
 app.config['MONGO_URI'] = os.environ.get('MONGODB_URI') #default['MONGO_URI']
 app.config['PREFERRED_URL_SCHEME'] = "https"
 
-# Create Pymongo
-mongo = PyMongo(app)
+# Persistence layer: connection factory + entity DAOs
+factory = get_factory()
+user_dao = UserDAO(factory)
+note_dao = NoteDAO(factory)
+message_dao = MessageDAO(factory)
 
 # Create Bcrypt
 bc = Bcrypt(app)
@@ -83,8 +93,11 @@ def login():
         # Render login page
         return render_template('login.html', error=request.args.get("error"))
     # Retrieve user from database
-    users = mongo.db.users
-    user_data = users.find_one({'email': request.form['email']}, {'_id': 0})
+    try:
+        user_data = user_dao.find_by_email(request.form['email'])
+    except PersistenceError:
+        # Database unavailable: same response as a failed login
+        return redirect(url_for('login', error=1))
     if user_data:
         # Check password hash
         if bc.check_password_hash(user_data['password'], request.form['pass']):
@@ -115,10 +128,12 @@ def register():
         last_name = request.form['last_name'].strip()
         password = request.form['pass'].strip()
 
-        users = mongo.db.users
         # Check if email address already exists
-        existing_user = users.find_one(
-            {'email': email}, {'_id': 0})
+        try:
+            existing_user = user_dao.find_by_email(email)
+        except PersistenceError:
+            # Handle database error
+            return redirect(url_for('register', error=2))
 
         if existing_user is None:
             logout_user()
@@ -131,7 +146,15 @@ def register():
             user_data_to_save['password'] = hashpass
 
             # Insert user record to database
-            if users.insert_one(user_data_to_save):
+            try:
+                inserted = user_dao.insert(user_data_to_save)
+            except DuplicateEmailError:
+                # Handle duplicate email
+                return redirect(url_for('register', error=1))
+            except PersistenceError:
+                # Handle database error
+                return redirect(url_for('register', error=2))
+            if inserted:
                 login_user(new_user)
                 send_registration_email(new_user)
                 return redirect(url_for('profile'))
@@ -153,7 +176,7 @@ def confirm_email(token):
     try:
         email = confirm_token(token)
         if email:
-            if mongo.db.users.update_one({"email": email}, {"$set": {"verified": True}}):
+            if user_dao.mark_verified(email):
                 return render_template('confirm.html', success=True)
     except:
         return render_template('confirm.html', success=False)
@@ -176,8 +199,7 @@ def send_verification_email():
 @app.route('/profile', methods=['GET'])
 @login_required
 def profile():
-    notes = mongo.db.notes.find(
-        {"user_id": current_user.id, "deleted": False}).sort("timestamp", -1)
+    notes = note_dao.find_for_user(current_user.id)
     return render_template('profile.html', notes=notes, title=current_user.title)
 
 
@@ -185,12 +207,9 @@ def profile():
 @app.route('/messages', methods=['GET'])
 @login_required
 def messages():
-    all_users = mongo.db.users.find(
-        {"id": {"$ne": current_user.id}}, {'_id': 0})
-    inbox_messages = mongo.db.messages.find(
-        {"to_id": current_user.id, "deleted": False}).sort("timestamp", -1)
-    sent_messages = mongo.db.messages.find(
-        {"from_id": current_user.id, "deleted": False, "hidden_for_sender": False}).sort("timestamp", -1)
+    all_users = user_dao.find_all_except(current_user.id)
+    inbox_messages = message_dao.find_inbox(current_user.id)
+    sent_messages = message_dao.find_sent(current_user.id)
     return render_template('messages.html', users=all_users, inbox_messages=inbox_messages, sent_messages=sent_messages)
 
 
@@ -213,7 +232,11 @@ def add_note():
     user_id = current_user.id
     user_name = current_user.display_name()
     note = Note(title, body, user_id, user_name)
-    if mongo.db.notes.insert_one(note.dict()):
+    try:
+        inserted = note_dao.insert(note.dict())
+    except PersistenceError:
+        return "Error! Could not add note"
+    if inserted:
         return "Success! Note added: " + title
     else:
         return "Error! Could not add note"
@@ -224,7 +247,11 @@ def add_note():
 @login_required
 def delete_note():
     note_id = request.form.get("note_id")
-    if mongo.db.notes.update_one({"id": note_id}, {"$set": {"deleted": True}}):
+    try:
+        updated = note_dao.mark_deleted(note_id)
+    except PersistenceError:
+        return "Error! Could not delete note"
+    if updated:
         return "Success! Note deleted"
     else:
         return "Error! Could not delete note"
@@ -239,11 +266,18 @@ def send_message():
     from_id = current_user.id
     from_name = current_user.display_name()
     to_id = request.form.get("user")
-    to_user_dict = mongo.db.users.find_one({"id": to_id})
+    try:
+        to_user_dict = user_dao.find_by_id(to_id)
+    except PersistenceError:
+        return "Error! Could not send message"
     to_user = User.make_from_dict(to_user_dict)
     to_name = to_user.display_name()
     message = Message(title, body, from_id, from_name, to_id, to_name)
-    if mongo.db.messages.insert_one(message.dict()):
+    try:
+        inserted = message_dao.insert(message.dict())
+    except PersistenceError:
+        return "Error! Could not send message"
+    if inserted:
         send_message_email(from_user=current_user,
                            to_user=to_user, message=message)
         return "Success! Message sent to " + to_name + ": " + title
@@ -256,7 +290,11 @@ def send_message():
 @login_required
 def delete_message():
     message_id = request.form.get("message_id")
-    if mongo.db.messages.update_one({"id": message_id}, {"$set": {"deleted": True}}):
+    try:
+        updated = message_dao.mark_deleted(message_id)
+    except PersistenceError:
+        return "Error! Could not delete message"
+    if updated:
         return "Success! Message deleted"
     else:
         return "Error! Could not delete message"
@@ -267,7 +305,11 @@ def delete_message():
 @login_required
 def hide_sent_message():
     message_id = request.form.get("message_id")
-    if mongo.db.messages.update_one({"id": message_id}, {"$set": {"hidden_for_sender": True}}):
+    try:
+        updated = message_dao.mark_hidden_for_sender(message_id)
+    except PersistenceError:
+        return "Error! Could not hide message"
+    if updated:
         return "Success! Message hidden from sender"
     else:
         return "Error! Could not hide message"
@@ -281,7 +323,11 @@ def change_name():
     first_name = request.form['first_name'].strip()
     last_name = request.form['last_name'].strip()
 
-    if mongo.db.users.update_one({"email": current_user.email}, {"$set": {"title": title, "first_name": first_name, "last_name": last_name}}):
+    try:
+        updated = user_dao.update_name(current_user.email, title, first_name, last_name)
+    except PersistenceError:
+        return "Error! Could not update user name"
+    if updated:
         return "User name updated successfully"
     else:
         return "Error! Could not update user name"
@@ -299,17 +345,26 @@ def delete_account():
     messages_deleted = False
 
     # Delete user details
-    if mongo.db.users.delete_one({"id": user_id}):
-        user_deleted = True
-        logout_user()
+    try:
+        if user_dao.delete_by_id(user_id):
+            user_deleted = True
+            logout_user()
+    except PersistenceError:
+        pass
 
     # Delete notes
-    if mongo.db.notes.delete_many({"user_id": user_id}):
-        notes_deleted = True
+    try:
+        if note_dao.delete_for_user(user_id):
+            notes_deleted = True
+    except PersistenceError:
+        pass
 
     # Delete messages
-    if mongo.db.messages.delete_many({"$or": [{"from_id": user_id}, {"to_id": user_id}]}):
-        messages_deleted = True
+    try:
+        if message_dao.delete_for_user(user_id):
+            messages_deleted = True
+    except PersistenceError:
+        pass
 
     return {"user_deleted": user_deleted, "notes_deleted": notes_deleted, "messages_deleted": messages_deleted}
 
@@ -320,11 +375,26 @@ def delete_account():
 @login_manager.user_loader
 def load_user(userid):
     # Return user object or none
-    users = mongo.db.users
-    user = users.find_one({'id': userid}, {'_id': 0})
+    user = user_dao.find_by_id(userid)
     if user:
         return User.make_from_dict(user)
     return None
+
+
+# STATUS PAGE
+
+@app.route('/status', methods=['GET'])
+def status():
+    return {
+        "status": "ok",
+        "connection_mode": factory.mode,
+        "connect_count": factory.connect_count,
+        "dao_calls": {
+            "user": user_dao.call_count,
+            "note": note_dao.call_count,
+            "message": message_dao.call_count,
+        },
+    }
 
 
 # Safe URL
@@ -336,8 +406,9 @@ def is_safe_url(target):
 
 
 # Heroku environment
-if os.environ.get('APP_LOCATION') == 'heroku':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-else:
-    app.run(host='localhost', port=8080, debug=True)
+if __name__ == '__main__':
+    if os.environ.get('APP_LOCATION') == 'heroku':
+        port = int(os.environ.get("PORT", 5000))
+        app.run(host="0.0.0.0", port=port)
+    else:
+        app.run(host='localhost', port=8080, debug=True)
